@@ -1,0 +1,26 @@
+{
+  "name": "llm-to-midi-project",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "llm-midi": "./apps/cli/dist/index.js"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @llm-midi/abc-core && npm run build -w llm-midi",
+    "typecheck": "npm run build -w @llm-midi/abc-core && npm run typecheck -w llm-midi",
+    "test": "vitest run",
+    "cli": "node apps/cli/dist/index.js",
+    "validate": "node apps/cli/dist/index.js validate",
+    "convert": "node apps/cli/dist/index.js convert"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.2"
+  }
+}

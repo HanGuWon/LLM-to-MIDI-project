@@ -1,0 +1,5 @@
+Please convert this phrase:
+
+C D E F | G A B c |
+
+This sentence should not be treated as ABC.
