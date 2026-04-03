@@ -8,11 +8,15 @@ import {
   getNormalizedTitle,
   type ConvertResult,
   type Diagnostic,
+  type InspectResult,
+  parseNormalizedAbcToCanonicalScore,
   type ValidateResult,
   validateAbc,
 } from "@llm-midi/abc-core";
+import { writeCanonicalScoreToMidiBuffer } from "@llm-midi/midi-smf";
 
-type CommandName = "validate" | "convert";
+type CommandName = "validate" | "convert" | "inspect";
+type EngineName = "abc2midi" | "internal" | "auto";
 
 type ParsedArgs = {
   command?: CommandName;
@@ -20,6 +24,7 @@ type ParsedArgs = {
   input?: string;
   exportDir?: string;
   abc2midiPath?: string;
+  engine?: EngineName;
 };
 
 type CliOutput = {
@@ -66,9 +71,17 @@ export async function runCli(
     };
   }
 
+  if (args.command === "inspect") {
+    const { result, exitCode } = await runInspectCommand(args, resolvedContext.cwd);
+    return {
+      exitCode,
+      stdout: `${JSON.stringify(result, null, 2)}\n`,
+    };
+  }
+
   return {
     exitCode: 1,
-    stdout: `${JSON.stringify(buildUsageError("Missing command. Use `validate` or `convert`."), null, 2)}\n`,
+    stdout: `${JSON.stringify(buildUsageError("Missing command. Use `validate`, `inspect`, or `convert`."), null, 2)}\n`,
   };
 }
 
@@ -104,6 +117,7 @@ export async function runConvertCommand(
   }
 
   const validation = validateAbc(abcText);
+  const engine = args.engine ?? "abc2midi";
 
   if (!validation.ok) {
     return {
@@ -112,11 +126,120 @@ export async function runConvertCommand(
         diagnostics: validation.diagnostics,
         toolStdout: "",
         toolStderr: "",
+        engineUsed: engine === "auto" ? undefined : engine,
       },
       exitCode: 1,
     };
   }
 
+  if (engine === "internal") {
+    return runInternalConvert(validation, context.cwd, args.exportDir);
+  }
+
+  if (engine === "auto") {
+    const internal = parseNormalizedAbcToCanonicalScore(
+      validation.normalizedAbc,
+      validation.classification,
+      validation.diagnostics,
+    );
+
+    if (internal.ok && internal.score) {
+      return writeInternalMidiResult(validation.normalizedAbc, internal.score, context.cwd, args.exportDir);
+    }
+
+    const fallback = await runAbc2MidiConvert(validation, context, args);
+    return {
+      exitCode: fallback.exitCode,
+      result: {
+        ...fallback.result,
+        fallback: {
+          attempted: "internal",
+          reason: "unsupported",
+          diagnostics: internal.diagnostics.filter((diagnostic) => diagnostic.blocked),
+        },
+      },
+    };
+  }
+
+  return runAbc2MidiConvert(validation, context, args);
+}
+
+export async function runInspectCommand(
+  args: ParsedArgs,
+  cwd: string,
+): Promise<{ result: InspectResult; exitCode: number }> {
+  const abcText = await readInput(args, cwd);
+
+  if (typeof abcText !== "string") {
+    return {
+      result: {
+        ok: false,
+        diagnostics: abcText.diagnostics,
+      },
+      exitCode: 1,
+    };
+  }
+
+  const validation = validateAbc(abcText);
+
+  if (!validation.ok) {
+    return {
+      result: {
+        ok: false,
+        diagnostics: validation.diagnostics,
+      },
+      exitCode: 1,
+    };
+  }
+
+  const internal = parseNormalizedAbcToCanonicalScore(
+    validation.normalizedAbc,
+    validation.classification,
+    validation.diagnostics,
+  );
+
+  return {
+    result: {
+      ok: internal.ok,
+      diagnostics: internal.diagnostics,
+      score: internal.score,
+    },
+    exitCode: internal.ok ? 0 : 1,
+  };
+}
+
+async function runInternalConvert(
+  validation: ValidateResult,
+  cwd: string,
+  exportDirArg?: string,
+): Promise<{ result: ConvertResult; exitCode: number }> {
+  const internal = parseNormalizedAbcToCanonicalScore(
+    validation.normalizedAbc,
+    validation.classification,
+    validation.diagnostics,
+  );
+
+  if (!internal.ok || !internal.score) {
+    return {
+      result: {
+        ok: false,
+        diagnostics: internal.diagnostics,
+        toolStdout: "",
+        toolStderr: "",
+        engineUsed: "internal",
+      },
+      exitCode: 1,
+    };
+  }
+
+  return writeInternalMidiResult(validation.normalizedAbc, internal.score, cwd, exportDirArg);
+}
+
+async function runAbc2MidiConvert(
+  validation: ValidateResult,
+  context: CliContext,
+  args: ParsedArgs,
+): Promise<{ result: ConvertResult; exitCode: number }> {
   const exportDir = path.resolve(context.cwd, args.exportDir ?? "exports");
   const toolPath = args.abc2midiPath ?? context.env.ABC2MIDI_PATH ?? "abc2midi";
   const toolRun = await runAbc2Midi(validation.normalizedAbc, toolPath);
@@ -129,6 +252,7 @@ export async function runConvertCommand(
         diagnostics,
         toolStdout: toolRun.stdout,
         toolStderr: toolRun.stderr,
+        engineUsed: "abc2midi",
       },
       exitCode: 1,
     };
@@ -148,6 +272,33 @@ export async function runConvertCommand(
       diagnostics,
       toolStdout: toolRun.stdout,
       toolStderr: toolRun.stderr,
+      engineUsed: "abc2midi",
+    },
+    exitCode: 0,
+  };
+}
+
+async function writeInternalMidiResult(
+  normalizedAbc: string,
+  score: NonNullable<InspectResult["score"]>,
+  cwd: string,
+  exportDirArg?: string,
+): Promise<{ result: ConvertResult; exitCode: number }> {
+  const exportDir = path.resolve(cwd, exportDirArg ?? "exports");
+  const fileName = `${slugify(getNormalizedTitle(normalizedAbc))}-${createContentHash(normalizedAbc)}.mid`;
+  const midiPath = path.join(exportDir, fileName);
+
+  await fs.mkdir(exportDir, { recursive: true });
+  await fs.writeFile(midiPath, writeCanonicalScoreToMidiBuffer(score));
+
+  return {
+    result: {
+      ok: true,
+      midiPath,
+      diagnostics: score.diagnostics,
+      toolStdout: "",
+      toolStderr: "",
+      engineUsed: "internal",
     },
     exitCode: 0,
   };
@@ -157,7 +308,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   const [commandToken, ...rest] = argv;
   const parsed: ParsedArgs = {};
 
-  if (commandToken === "validate" || commandToken === "convert") {
+  if (commandToken === "validate" || commandToken === "convert" || commandToken === "inspect") {
     parsed.command = commandToken;
   }
 
@@ -165,7 +316,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     const token = rest[index];
     const next = rest[index + 1];
 
-    if ((token === "--text" || token === "--input" || token === "--export-dir" || token === "--abc2midi-path") && next) {
+    if ((token === "--text" || token === "--input" || token === "--export-dir" || token === "--abc2midi-path" || token === "--engine") && next) {
       if (token === "--text") {
         parsed.text = next;
       }
@@ -180,6 +331,10 @@ function parseArgs(argv: string[]): ParsedArgs {
 
       if (token === "--abc2midi-path") {
         parsed.abc2midiPath = next;
+      }
+
+      if (token === "--engine" && (next === "abc2midi" || next === "internal" || next === "auto")) {
+        parsed.engine = next;
       }
 
       index += 1;

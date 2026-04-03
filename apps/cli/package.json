@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@llm-midi/abc-core": "file:../../packages/abc-core"
+    "@llm-midi/abc-core": "file:../../packages/abc-core",
+    "@llm-midi/midi-smf": "file:../../packages/midi-smf"
   }
 }

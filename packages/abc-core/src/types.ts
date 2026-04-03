@@ -26,4 +26,22 @@ export interface ConvertResult {
   diagnostics: Diagnostic[];
   toolStdout: string;
   toolStderr: string;
+  engineUsed?: "abc2midi" | "internal";
+  fallback?: {
+    attempted: "internal";
+    reason: "unsupported";
+    diagnostics: Diagnostic[];
+  };
+}
+
+export interface InspectResult {
+  ok: boolean;
+  diagnostics: Diagnostic[];
+  score?: import("@llm-midi/score-model").CanonicalScore;
+}
+
+export interface InternalEngineResult {
+  ok: boolean;
+  diagnostics: Diagnostic[];
+  score?: import("@llm-midi/score-model").CanonicalScore;
 }
