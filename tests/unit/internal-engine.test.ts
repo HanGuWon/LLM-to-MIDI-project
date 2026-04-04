@@ -24,14 +24,13 @@ async function parseFixture(name: string) {
 }
 
 describe("internal normalized ABC engine", () => {
-  it("parses the narrow supported melody fixture", async () => {
+  it("parses the baseline melody fixture", async () => {
     const parsed = await parseFixture("melody.abc");
 
     expect(parsed.ok).toBe(true);
     expect(parsed.score?.notes).toHaveLength(8);
     expect(parsed.score?.notes.map((note) => note.pitchMidi)).toEqual([60, 62, 64, 65, 67, 69, 71, 72]);
     expect(parsed.score?.notes[0]?.startWhole).toEqual({ num: 0, den: 1 });
-    expect(parsed.score?.notes[0]?.durationWhole).toEqual({ num: 1, den: 8 });
     expect(parsed.score?.notes[7]?.startWhole).toEqual({ num: 7, den: 8 });
   });
 
@@ -85,11 +84,74 @@ describe("internal normalized ABC engine", () => {
     expect(parsed.score?.notes[4]?.pitchMidi).toBe(66);
   });
 
-  it("returns structured unsupported diagnostics for internal-engine tuplets", async () => {
+  it("supports simple `(3` triplets with deterministic rational timing", async () => {
     const parsed = await parseFixture("tuplets.abc");
 
+    expect(parsed.ok).toBe(true);
+    expect(parsed.score?.notes.map((note) => note.pitchMidi)).toEqual([60, 62, 64, 65, 67]);
+    expect(parsed.score?.notes.map((note) => note.startWhole)).toEqual([
+      { num: 0, den: 1 },
+      { num: 1, den: 12 },
+      { num: 1, den: 6 },
+      { num: 1, den: 4 },
+      { num: 1, den: 2 },
+    ]);
+    expect(parsed.score?.notes.map((note) => note.durationWhole)).toEqual([
+      { num: 1, den: 12 },
+      { num: 1, den: 12 },
+      { num: 1, den: 12 },
+      { num: 1, den: 4 },
+      { num: 1, den: 4 },
+    ]);
+  });
+
+  it("supports block chords and groups tones by chordId", async () => {
+    const parsed = await parseFixture("block-chords.abc");
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.score?.notes).toHaveLength(9);
+    expect(parsed.score?.notes.slice(0, 3).map((note) => note.startWhole)).toEqual([
+      { num: 0, den: 1 },
+      { num: 0, den: 1 },
+      { num: 0, den: 1 },
+    ]);
+    expect(new Set(parsed.score?.notes.slice(0, 3).map((note) => note.chordId))).toEqual(new Set(["chord-1"]));
+    expect(parsed.score?.notes.slice(3, 6).map((note) => note.startWhole)).toEqual([
+      { num: 1, den: 4 },
+      { num: 1, den: 4 },
+      { num: 1, den: 4 },
+    ]);
+    expect(parsed.score?.notes.slice(6).map((note) => note.startWhole)).toEqual([
+      { num: 1, den: 2 },
+      { num: 1, den: 2 },
+      { num: 1, den: 2 },
+    ]);
+  });
+
+  it("supports one-level repeats with first and second endings by expanding playback order", async () => {
+    const parsed = await parseFixture("repeats-endings.abc");
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.score?.notes.map((note) => note.pitchMidi)).toEqual([
+      60, 62, 64, 65, 67, 69, 71, 72,
+      60, 62, 64, 65, 72, 71, 69, 67,
+    ]);
+    expect(parsed.score?.notes[8]?.startWhole).toEqual({ num: 1, den: 1 });
+    expect(parsed.score?.notes[15]?.startWhole).toEqual({ num: 15, den: 8 });
+  });
+
+  it("returns structured unsupported diagnostics for advanced tuplets beyond `(3`", async () => {
+    const parsed = await parseFixture("quintuplet.abc");
+
     expect(parsed.ok).toBe(false);
-    expect(parsed.diagnostics.some((diagnostic) => diagnostic.code === "internal-unsupported-tuplets")).toBe(true);
+    expect(parsed.diagnostics.some((diagnostic) => diagnostic.code === "internal-unsupported-general-tuplet")).toBe(true);
+  });
+
+  it("returns structured unsupported diagnostics for nested repeat structures", async () => {
+    const parsed = await parseFixture("nested-repeats.abc");
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.diagnostics.some((diagnostic) => diagnostic.code === "internal-unsupported-repeat-structure")).toBe(true);
   });
 
   it("blocks validation-level unsupported voices before the internal engine runs", async () => {

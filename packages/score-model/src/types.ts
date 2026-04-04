@@ -22,6 +22,7 @@ export interface CanonicalNote {
   durationWhole: Rational;
   velocity: number;
   voiceId: string;
+  chordId?: string;
   sourceLine?: number;
   sourceColumn?: number;
 }

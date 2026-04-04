@@ -56,7 +56,6 @@ const MINOR_KEY_SIGNATURES = new Map<string, number>([
 
 type ParsedHeaders = {
   title: string;
-  meter?: string;
   noteLength: Rational;
   tempo: TempoEvent[];
   timeSignature?: TimeSignatureEvent;
@@ -66,23 +65,42 @@ type ParsedHeaders = {
   bodyStartLine: number;
 };
 
-type BodyEvent =
-  | {
-      kind: "note";
-      pitchMidi: number;
-      startWhole: Rational;
-      durationWhole: Rational;
-      sourceLine: number;
-      sourceColumn: number;
-      tieToNext: boolean;
-    }
-  | {
-      kind: "rest";
-      startWhole: Rational;
-      durationWhole: Rational;
-      sourceLine: number;
-      sourceColumn: number;
-    };
+type BodyMarkerKind = "bar" | "repeatStart" | "repeatEnd" | "ending1" | "ending2" | "finalBar";
+
+type BodyMarker = {
+  kind: BodyMarkerKind;
+  sourceLine: number;
+  sourceColumn: number;
+};
+
+type NoteAtom = {
+  kind: "note";
+  pitchMidi: number;
+  durationWhole: Rational;
+  sourceLine: number;
+  sourceColumn: number;
+  tieToNext: boolean;
+};
+
+type RestAtom = {
+  kind: "rest";
+  durationWhole: Rational;
+  sourceLine: number;
+  sourceColumn: number;
+};
+
+type ChordAtom = {
+  kind: "chord";
+  pitchesMidi: number[];
+  durationWhole: Rational;
+  sourceLine: number;
+  sourceColumn: number;
+  chordId: string;
+};
+
+type BodyAtom = NoteAtom | RestAtom | ChordAtom;
+type BodyItem = BodyAtom | BodyMarker;
+type TimedBodyAtom = (NoteAtom | RestAtom | ChordAtom) & { startWhole: Rational };
 
 export function parseNormalizedAbcToCanonicalScore(
   normalizedAbc: string,
@@ -90,16 +108,13 @@ export function parseNormalizedAbcToCanonicalScore(
   baseDiagnostics: Diagnostic[] = [],
 ): InternalEngineResult {
   const diagnostics = [...baseDiagnostics];
-  const headers = parseHeaders(normalizedAbc, classification, diagnostics);
+  const headers = parseHeaders(normalizedAbc, diagnostics);
 
   if (!headers) {
-    return {
-      ok: false,
-      diagnostics,
-    };
+    return { ok: false, diagnostics };
   }
 
-  const parseResult = parseBody(
+  const bodyItems = parseBodyItems(
     headers.bodyText,
     headers.bodyStartLine,
     headers.noteLength,
@@ -107,14 +122,19 @@ export function parseNormalizedAbcToCanonicalScore(
     diagnostics,
   );
 
-  if (!parseResult) {
-    return {
-      ok: false,
-      diagnostics,
-    };
+  if (!bodyItems) {
+    return { ok: false, diagnostics };
   }
 
-  const notes = mergeTiedNotes(parseResult, diagnostics);
+  const expandedAtoms = expandStructuralItems(bodyItems, diagnostics);
+
+  if (!expandedAtoms) {
+    return { ok: false, diagnostics };
+  }
+
+  const timedAtoms = assignPlaybackTimes(expandedAtoms);
+  const notes = materializeCanonicalNotes(timedAtoms, diagnostics);
+
   const score: CanonicalScore = {
     title: headers.title,
     normalizedAbc,
@@ -135,7 +155,6 @@ export function parseNormalizedAbcToCanonicalScore(
 
 function parseHeaders(
   normalizedAbc: string,
-  classification: Classification,
   diagnostics: Diagnostic[],
 ): ParsedHeaders | undefined {
   const lines = normalizedAbc.split("\n");
@@ -166,24 +185,20 @@ function parseHeaders(
   const bodyText = lines.slice(bodyStartLine - 1).join("\n").trim();
 
   if (!bodyText) {
-    diagnostics.push({
-      code: "internal-missing-body",
-      severity: "error",
-      message: "Internal engine requires normalized ABC with a non-empty body.",
-      blocked: true,
-    });
+    diagnostics.push(blockingDiagnostic(
+      "internal-missing-body",
+      "Internal engine requires normalized ABC with a non-empty body.",
+    ));
     return undefined;
   }
 
   const noteLength = parseRationalHeader(headerMap.get("L"));
 
   if (!noteLength) {
-    diagnostics.push({
-      code: "internal-invalid-note-length-header",
-      severity: "error",
-      message: "Internal engine could not parse the normalized `L:` header.",
-      blocked: true,
-    });
+    diagnostics.push(blockingDiagnostic(
+      "internal-invalid-note-length-header",
+      "Internal engine could not parse the normalized `L:` header.",
+    ));
     return undefined;
   }
 
@@ -193,7 +208,6 @@ function parseHeaders(
 
   return {
     title: headerMap.get("T") ?? "Imported Fragment",
-    meter: headerMap.get("M"),
     noteLength,
     tempo,
     timeSignature,
@@ -209,34 +223,24 @@ function parseTempoHeader(
   diagnostics: Diagnostic[],
 ): TempoEvent[] {
   if (!rawTempo) {
-    return [
-      {
-        atWhole: createRational(0, 1),
-        bpm: 120,
-        beatUnitDen: 4,
-      },
-    ];
+    return [{ atWhole: createRational(0, 1), bpm: 120, beatUnitDen: 4 }];
   }
 
   const match = rawTempo.match(/(?:(\d+)\s*\/\s*(\d+)\s*=)?\s*(\d+)/);
 
   if (!match) {
-    diagnostics.push({
-      code: "internal-unsupported-tempo-format",
-      severity: "error",
-      message: `Internal engine does not support the normalized tempo format \`${rawTempo}\`.`,
-      blocked: true,
-    });
+    diagnostics.push(blockingDiagnostic(
+      "internal-unsupported-tempo-format",
+      `Internal engine does not support the normalized tempo format \`${rawTempo}\`.`,
+    ));
     return [];
   }
 
-  return [
-    {
-      atWhole: createRational(0, 1),
-      bpm: Number(match[3]),
-      beatUnitDen: Number(match[2] ?? 4),
-    },
-  ];
+  return [{
+    atWhole: createRational(0, 1),
+    bpm: Number(match[3]),
+    beatUnitDen: Number(match[2] ?? 4),
+  }];
 }
 
 function parseTimeSignatureHeader(
@@ -248,30 +252,20 @@ function parseTimeSignatureHeader(
   }
 
   if (rawMeter === "C") {
-    return {
-      atWhole: createRational(0, 1),
-      numerator: 4,
-      denominator: 4,
-    };
+    return { atWhole: createRational(0, 1), numerator: 4, denominator: 4 };
   }
 
   if (rawMeter === "C|") {
-    return {
-      atWhole: createRational(0, 1),
-      numerator: 2,
-      denominator: 2,
-    };
+    return { atWhole: createRational(0, 1), numerator: 2, denominator: 2 };
   }
 
   const match = rawMeter.match(/^(\d+)\s*\/\s*(\d+)$/);
 
   if (!match) {
-    diagnostics.push({
-      code: "internal-unsupported-meter-format",
-      severity: "error",
-      message: `Internal engine does not support the normalized meter format \`${rawMeter}\`.`,
-      blocked: true,
-    });
+    diagnostics.push(blockingDiagnostic(
+      "internal-unsupported-meter-format",
+      `Internal engine does not support the normalized meter format \`${rawMeter}\`.`,
+    ));
     return undefined;
   }
 
@@ -292,11 +286,7 @@ function parseKeyHeader(
 
   if (/^none$/i.test(rawKey)) {
     return {
-      info: {
-        tonic: "none",
-        mode: "none",
-        accidentals: [],
-      },
+      info: { tonic: "none", mode: "none", accidentals: [] },
       accidentals: new Map<string, number>(),
     };
   }
@@ -305,12 +295,10 @@ function parseKeyHeader(
   const match = trimmed.match(/^([A-Ga-g])([b#]?)(.*)$/);
 
   if (!match) {
-    diagnostics.push({
-      code: "internal-unsupported-key-format",
-      severity: "error",
-      message: `Internal engine does not support the normalized key format \`${rawKey}\`.`,
-      blocked: true,
-    });
+    diagnostics.push(blockingDiagnostic(
+      "internal-unsupported-key-format",
+      `Internal engine does not support the normalized key format \`${rawKey}\`.`,
+    ));
     return undefined;
   }
 
@@ -322,12 +310,10 @@ function parseKeyHeader(
     : MINOR_KEY_SIGNATURES.get(tonic);
 
   if (signatureCount === undefined) {
-    diagnostics.push({
-      code: "internal-unsupported-key-signature",
-      severity: "error",
-      message: `Internal engine does not recognize the key signature \`${rawKey}\`.`,
-      blocked: true,
-    });
+    diagnostics.push(blockingDiagnostic(
+      "internal-unsupported-key-signature",
+      `Internal engine does not recognize the key signature \`${rawKey}\`.`,
+    ));
     return undefined;
   }
 
@@ -355,220 +341,319 @@ function parseKeyHeader(
   };
 }
 
-function parseBody(
+function parseBodyItems(
   bodyText: string,
   bodyStartLine: number,
   defaultNoteLength: Rational,
   keyAccidentals: Map<string, number>,
   diagnostics: Diagnostic[],
-): BodyEvent[] | undefined {
-  const events: BodyEvent[] = [];
-  let currentTime = createRational(0, 1);
-  let line = bodyStartLine;
-  let column = 1;
-  let index = 0;
+): BodyItem[] | undefined {
+  const items: BodyItem[] = [];
   const barAccidentals = new Map<string, number>();
+  let index = 0;
+  let chordCounter = 0;
+  let activeTriplet: { remaining: number; line: number; column: number } | undefined;
 
   while (index < bodyText.length) {
     const char = bodyText[index];
 
-    if (char === "\n") {
-      line += 1;
-      column = 1;
+    if (char === "\n" || /\s/.test(char)) {
       index += 1;
       continue;
     }
 
-    if (/\s/.test(char)) {
-      column += 1;
-      index += 1;
-      continue;
-    }
+    const source = indexToLineColumn(bodyText, index, bodyStartLine);
 
     if (char === "\"") {
       const chordEnd = bodyText.indexOf("\"", index + 1);
-      const endIndex = chordEnd === -1 ? bodyText.length : chordEnd + 1;
-      const consumed = bodyText.slice(index, endIndex);
-      const lineBreakCount = consumed.split("\n").length - 1;
+      index = chordEnd === -1 ? bodyText.length : chordEnd + 1;
+      continue;
+    }
 
-      if (lineBreakCount > 0) {
-        line += lineBreakCount;
-        column = consumed.slice(consumed.lastIndexOf("\n") + 1).length + 1;
-      } else {
-        column += consumed.length;
-      }
+    if (bodyText.startsWith("|:", index)) {
+      barAccidentals.clear();
+      items.push({ kind: "repeatStart", sourceLine: source.line, sourceColumn: source.column });
+      index += 2;
+      continue;
+    }
 
-      index = endIndex;
+    if (bodyText.startsWith(":|", index)) {
+      barAccidentals.clear();
+      items.push({ kind: "repeatEnd", sourceLine: source.line, sourceColumn: source.column });
+      index += 2;
+      continue;
+    }
+
+    if (bodyText.startsWith("||", index)) {
+      barAccidentals.clear();
+      items.push({ kind: "finalBar", sourceLine: source.line, sourceColumn: source.column });
+      index += 2;
+      continue;
+    }
+
+    if (bodyText.startsWith("[1", index)) {
+      barAccidentals.clear();
+      items.push({ kind: "ending1", sourceLine: source.line, sourceColumn: source.column });
+      index += 2;
+      continue;
+    }
+
+    if (bodyText.startsWith("[2", index)) {
+      barAccidentals.clear();
+      items.push({ kind: "ending2", sourceLine: source.line, sourceColumn: source.column });
+      index += 2;
       continue;
     }
 
     if (char === "|") {
       barAccidentals.clear();
-      column += 1;
+      items.push({ kind: "bar", sourceLine: source.line, sourceColumn: source.column });
       index += 1;
       continue;
     }
 
-    if (char === ":") {
-      diagnostics.push(unsupportedDiagnostic("internal-unsupported-repeats", "repeats and endings", line, column));
-      return undefined;
+    if (char === "(" && /\d/.test(bodyText[index + 1] ?? "")) {
+      if ((bodyText[index + 2] ?? "") === ":") {
+        diagnostics.push(blockingDiagnostic(
+          "internal-unsupported-general-tuplet",
+          "Internal engine only supports standard `(3` triplets, not extended tuplet ratios.",
+          source.line,
+          source.column,
+        ));
+        return undefined;
+      }
+
+      if (bodyText[index + 1] !== "3") {
+        diagnostics.push(blockingDiagnostic(
+          "internal-unsupported-general-tuplet",
+          `Internal engine only supports standard \`(3\` triplets, not \`(${bodyText[index + 1]}\`.`,
+          source.line,
+          source.column,
+        ));
+        return undefined;
+      }
+
+      if (activeTriplet) {
+        diagnostics.push(blockingDiagnostic(
+          "internal-unsupported-nested-triplet",
+          "Internal engine does not support nested or overlapping triplets.",
+          source.line,
+          source.column,
+        ));
+        return undefined;
+      }
+
+      activeTriplet = { remaining: 3, line: source.line, column: source.column };
+      index += 2;
+      continue;
     }
 
     if (char === "[") {
-      diagnostics.push(unsupportedDiagnostic("internal-unsupported-block-chords", "block chords and endings", line, column));
-      return undefined;
-    }
-
-    if (char === "(" && /\d/.test(bodyText[index + 1] ?? "")) {
-      diagnostics.push(unsupportedDiagnostic("internal-unsupported-tuplets", "tuplets", line, column));
-      return undefined;
-    }
-
-    if (char === "&") {
-      diagnostics.push(unsupportedDiagnostic("internal-unsupported-voice-overlay", "voice overlays", line, column));
-      return undefined;
-    }
-
-    if (/[VPwW]/.test(char) && bodyText[index + 1] === ":") {
-      diagnostics.push(unsupportedDiagnostic("internal-unsupported-structure", `${char}: structures`, line, column));
-      return undefined;
-    }
-
-    const noteStartLine = line;
-    const noteStartColumn = column;
-    let accidentalOffset: number | undefined;
-    let noteIndex = index;
-
-    if (bodyText[noteIndex] === "^" || bodyText[noteIndex] === "_" || bodyText[noteIndex] === "=") {
-      const accidentalSymbol = bodyText[noteIndex];
-      let accidentalCount = 0;
-
-      while (bodyText[noteIndex] === accidentalSymbol) {
-        accidentalCount += 1;
-        noteIndex += 1;
-        column += 1;
+      if (activeTriplet) {
+        diagnostics.push(blockingDiagnostic(
+          "internal-unsupported-triplet-chord-mix",
+          "Internal engine does not support block chords inside triplet groups.",
+          source.line,
+          source.column,
+        ));
+        return undefined;
       }
 
-      if (accidentalSymbol === "=") {
-        accidentalOffset = 0;
-      } else {
-        accidentalOffset = accidentalSymbol === "^" ? accidentalCount : -accidentalCount;
+      const chord = parseChordAtom(
+        bodyText,
+        index,
+        source.line,
+        source.column,
+        defaultNoteLength,
+        keyAccidentals,
+        barAccidentals,
+        diagnostics,
+        ++chordCounter,
+      );
+
+      if (!chord) {
+        return undefined;
       }
+
+      items.push(chord.atom);
+      index = chord.nextIndex;
+      continue;
     }
 
-    const pitchChar = bodyText[noteIndex];
+    const atom = parseSimpleAtom(
+      bodyText,
+      index,
+      source.line,
+      source.column,
+      defaultNoteLength,
+      keyAccidentals,
+      barAccidentals,
+      diagnostics,
+      activeTriplet ? createRational(2, 3) : undefined,
+    );
 
-    if (!pitchChar || !/[A-Ga-gzZ]/.test(pitchChar)) {
-      diagnostics.push({
-        code: "internal-unexpected-token",
-        severity: "error",
-        message: `Internal engine found an unsupported token \`${pitchChar ?? "EOF"}\`.`,
-        line: noteStartLine,
-        column: noteStartColumn,
-        blocked: true,
-      });
+    if (!atom) {
       return undefined;
     }
 
-    noteIndex += 1;
-    column += 1;
-    let octaveDelta = 0;
+    items.push(atom.atom);
+    index = atom.nextIndex;
 
-    while (bodyText[noteIndex] === "'" || bodyText[noteIndex] === ",") {
-      octaveDelta += bodyText[noteIndex] === "'" ? 12 : -12;
-      noteIndex += 1;
-      column += 1;
-    }
-
-    const lengthStart = noteIndex;
-    while (/[0-9/]/.test(bodyText[noteIndex] ?? "")) {
-      noteIndex += 1;
-      column += 1;
-    }
-
-    const rawLength = bodyText.slice(lengthStart, noteIndex);
-    const durationMultiplier = parseLengthMultiplier(rawLength, noteStartLine, noteStartColumn, diagnostics);
-
-    if (!durationMultiplier) {
-      return undefined;
-    }
-
-    const durationWhole = multiplyRational(defaultNoteLength, durationMultiplier);
-    let tieToNext = false;
-
-    if (bodyText[noteIndex] === "-") {
-      tieToNext = true;
-      noteIndex += 1;
-      column += 1;
-    }
-
-    if (pitchChar === "z" || pitchChar === "Z") {
-      events.push({
-        kind: "rest",
-        startWhole: currentTime,
-        durationWhole,
-        sourceLine: noteStartLine,
-        sourceColumn: noteStartColumn,
-      });
-    } else {
-      const noteLetter = pitchChar.toUpperCase();
-      const resolvedAccidental = accidentalOffset
-        ?? barAccidentals.get(noteLetter)
-        ?? keyAccidentals.get(noteLetter)
-        ?? 0;
-
-      if (accidentalOffset !== undefined) {
-        barAccidentals.set(noteLetter, accidentalOffset);
+    if (activeTriplet) {
+      activeTriplet.remaining -= 1;
+      if (activeTriplet.remaining === 0) {
+        activeTriplet = undefined;
       }
-
-      events.push({
-        kind: "note",
-        pitchMidi: pitchCharToMidi(pitchChar) + octaveDelta + resolvedAccidental,
-        startWhole: currentTime,
-        durationWhole,
-        sourceLine: noteStartLine,
-        sourceColumn: noteStartColumn,
-        tieToNext,
-      });
     }
-
-    currentTime = addRational(currentTime, durationWhole);
-    index = noteIndex;
   }
 
-  return events;
+  if (activeTriplet) {
+    diagnostics.push(blockingDiagnostic(
+      "internal-incomplete-triplet",
+      "Internal engine found an incomplete `(3` triplet group.",
+      activeTriplet.line,
+      activeTriplet.column,
+    ));
+    return undefined;
+  }
+
+  return items;
 }
 
-function mergeTiedNotes(
-  events: BodyEvent[],
+function expandStructuralItems(
+  items: BodyItem[],
+  diagnostics: Diagnostic[],
+): BodyAtom[] | undefined {
+  const repeatStarts = collectMarkerIndices(items, "repeatStart");
+  const repeatEnds = collectMarkerIndices(items, "repeatEnd");
+  const ending1s = collectMarkerIndices(items, "ending1");
+  const ending2s = collectMarkerIndices(items, "ending2");
+
+  if (repeatStarts.length === 0 && repeatEnds.length === 0 && ending1s.length === 0 && ending2s.length === 0) {
+    return items.filter(isAtom);
+  }
+
+  if (repeatStarts.length !== 1 || repeatEnds.length !== 1 || ending1s.length > 1 || ending2s.length > 1) {
+    diagnostics.push(blockingDiagnostic(
+      "internal-unsupported-repeat-structure",
+      "Internal engine supports only a single one-level repeat region with optional first/second endings.",
+    ));
+    return undefined;
+  }
+
+  const repeatStart = repeatStarts[0];
+  const repeatEnd = repeatEnds[0];
+
+  if (repeatStart >= repeatEnd) {
+    diagnostics.push(blockingDiagnostic(
+      "internal-invalid-repeat-order",
+      "Internal engine found a repeat end before its repeat start.",
+    ));
+    return undefined;
+  }
+
+  const prefix = extractAtoms(items.slice(0, repeatStart));
+
+  if (ending1s.length === 0 && ending2s.length === 0) {
+    const loop = extractAtoms(items.slice(repeatStart + 1, repeatEnd));
+    const suffix = extractAtoms(items.slice(repeatEnd + 1));
+    return [...prefix, ...loop, ...loop, ...suffix];
+  }
+
+  if (ending1s.length !== 1 || ending2s.length !== 1) {
+    diagnostics.push(blockingDiagnostic(
+      "internal-unsupported-repeat-endings",
+      "Internal engine requires both `[1` and `[2` when repeat endings are used.",
+    ));
+    return undefined;
+  }
+
+  const ending1 = ending1s[0];
+  const ending2 = ending2s[0];
+
+  if (!(repeatStart < ending1 && ending1 < repeatEnd && repeatEnd < ending2)) {
+    diagnostics.push(blockingDiagnostic(
+      "internal-invalid-repeat-endings",
+      "Internal engine could not match the repeat and ending markers into a supported one-level structure.",
+    ));
+    return undefined;
+  }
+
+  if (extractAtoms(items.slice(repeatEnd + 1, ending2)).length > 0) {
+    diagnostics.push(blockingDiagnostic(
+      "internal-unsupported-repeat-structure",
+      "Internal engine does not support extra playback atoms between `:|` and `[2`.",
+    ));
+    return undefined;
+  }
+
+  const common = extractAtoms(items.slice(repeatStart + 1, ending1));
+  const firstEnding = extractAtoms(items.slice(ending1 + 1, repeatEnd));
+  const secondEnding = extractAtoms(items.slice(ending2 + 1));
+
+  return [...prefix, ...common, ...firstEnding, ...common, ...secondEnding];
+}
+
+function assignPlaybackTimes(atoms: BodyAtom[]): TimedBodyAtom[] {
+  const timedAtoms: TimedBodyAtom[] = [];
+  let currentTime = createRational(0, 1);
+
+  for (const atom of atoms) {
+    timedAtoms.push({
+      ...atom,
+      startWhole: currentTime,
+    });
+    currentTime = addRational(currentTime, atom.durationWhole);
+  }
+
+  return timedAtoms;
+}
+
+function materializeCanonicalNotes(
+  atoms: TimedBodyAtom[],
   diagnostics: Diagnostic[],
 ): CanonicalNote[] {
   const notes: CanonicalNote[] = [];
   let noteCounter = 0;
 
-  for (let index = 0; index < events.length; index += 1) {
-    const event = events[index];
+  for (let index = 0; index < atoms.length; index += 1) {
+    const atom = atoms[index];
 
-    if (event.kind !== "note") {
+    if (atom.kind === "rest") {
       continue;
     }
 
-    let mergedDuration = event.durationWhole;
-    let current = event;
+    if (atom.kind === "chord") {
+      for (const pitchMidi of atom.pitchesMidi) {
+        notes.push({
+          id: `note-${++noteCounter}`,
+          pitchMidi,
+          startWhole: atom.startWhole,
+          durationWhole: atom.durationWhole,
+          velocity: 100,
+          voiceId: "1",
+          chordId: atom.chordId,
+          sourceLine: atom.sourceLine,
+          sourceColumn: atom.sourceColumn,
+        });
+      }
+      continue;
+    }
+
+    let mergedDuration = atom.durationWhole;
+    let current = atom;
     let nextIndex = index + 1;
 
     while (current.tieToNext) {
-      const next = events[nextIndex];
+      const next = atoms[nextIndex];
 
       if (!next || next.kind !== "note" || next.pitchMidi !== current.pitchMidi) {
-        diagnostics.push({
-          code: "internal-invalid-tie-chain",
-          severity: "error",
-          message: "Internal engine only supports ties between immediately adjacent identical pitches.",
-          line: current.sourceLine,
-          column: current.sourceColumn,
-          blocked: true,
-        });
+        diagnostics.push(blockingDiagnostic(
+          "internal-invalid-tie-chain",
+          "Internal engine only supports ties between immediately adjacent identical note atoms.",
+          current.sourceLine,
+          current.sourceColumn,
+        ));
         return [];
       }
 
@@ -579,19 +664,268 @@ function mergeTiedNotes(
 
     notes.push({
       id: `note-${++noteCounter}`,
-      pitchMidi: event.pitchMidi,
-      startWhole: event.startWhole,
+      pitchMidi: atom.pitchMidi,
+      startWhole: atom.startWhole,
       durationWhole: mergedDuration,
       velocity: 100,
       voiceId: "1",
-      sourceLine: event.sourceLine,
-      sourceColumn: event.sourceColumn,
+      sourceLine: atom.sourceLine,
+      sourceColumn: atom.sourceColumn,
     });
 
     index = nextIndex - 1;
   }
 
   return notes;
+}
+
+function parseSimpleAtom(
+  bodyText: string,
+  index: number,
+  line: number,
+  column: number,
+  defaultNoteLength: Rational,
+  keyAccidentals: Map<string, number>,
+  barAccidentals: Map<string, number>,
+  diagnostics: Diagnostic[],
+  tupletFactor?: Rational,
+): { atom: NoteAtom | RestAtom; nextIndex: number } | undefined {
+  let noteIndex = index;
+  let accidentalOffset: number | undefined;
+
+  if (bodyText[noteIndex] === "^" || bodyText[noteIndex] === "_" || bodyText[noteIndex] === "=") {
+    const accidentalSymbol = bodyText[noteIndex];
+    let accidentalCount = 0;
+
+    while (bodyText[noteIndex] === accidentalSymbol) {
+      accidentalCount += 1;
+      noteIndex += 1;
+    }
+
+    accidentalOffset = accidentalSymbol === "=" ? 0 : accidentalSymbol === "^" ? accidentalCount : -accidentalCount;
+  }
+
+  const pitchChar = bodyText[noteIndex];
+
+  if (!pitchChar || !/[A-Ga-gzZ]/.test(pitchChar)) {
+    diagnostics.push(blockingDiagnostic(
+      "internal-unexpected-token",
+      `Internal engine found an unsupported token \`${pitchChar ?? "EOF"}\`.`,
+      line,
+      column,
+    ));
+    return undefined;
+  }
+
+  noteIndex += 1;
+  let octaveDelta = 0;
+
+  while (bodyText[noteIndex] === "'" || bodyText[noteIndex] === ",") {
+    octaveDelta += bodyText[noteIndex] === "'" ? 12 : -12;
+    noteIndex += 1;
+  }
+
+  const lengthStart = noteIndex;
+  while (/[0-9/]/.test(bodyText[noteIndex] ?? "")) {
+    noteIndex += 1;
+  }
+
+  const rawLength = bodyText.slice(lengthStart, noteIndex);
+  const durationMultiplier = parseLengthMultiplier(rawLength, line, column, diagnostics);
+
+  if (!durationMultiplier) {
+    return undefined;
+  }
+
+  let durationWhole = multiplyRational(defaultNoteLength, durationMultiplier);
+  if (tupletFactor) {
+    durationWhole = multiplyRational(durationWhole, tupletFactor);
+  }
+
+  let tieToNext = false;
+
+  if (bodyText[noteIndex] === "-") {
+    tieToNext = true;
+    noteIndex += 1;
+  }
+
+  if (pitchChar === "z" || pitchChar === "Z") {
+    if (tieToNext) {
+      diagnostics.push(blockingDiagnostic(
+        "internal-invalid-rest-tie",
+        "Internal engine does not support ties on rests.",
+        line,
+        column,
+      ));
+      return undefined;
+    }
+
+    return {
+      atom: {
+        kind: "rest",
+        durationWhole,
+        sourceLine: line,
+        sourceColumn: column,
+      },
+      nextIndex: noteIndex,
+    };
+  }
+
+  const noteLetter = pitchChar.toUpperCase();
+  const resolvedAccidental = accidentalOffset
+    ?? barAccidentals.get(noteLetter)
+    ?? keyAccidentals.get(noteLetter)
+    ?? 0;
+
+  if (accidentalOffset !== undefined) {
+    barAccidentals.set(noteLetter, accidentalOffset);
+  }
+
+  return {
+    atom: {
+      kind: "note",
+      pitchMidi: pitchCharToMidi(pitchChar) + octaveDelta + resolvedAccidental,
+      durationWhole,
+      sourceLine: line,
+      sourceColumn: column,
+      tieToNext,
+    },
+    nextIndex: noteIndex,
+  };
+}
+
+function parseChordAtom(
+  bodyText: string,
+  index: number,
+  line: number,
+  column: number,
+  defaultNoteLength: Rational,
+  keyAccidentals: Map<string, number>,
+  barAccidentals: Map<string, number>,
+  diagnostics: Diagnostic[],
+  chordCounter: number,
+): { atom: ChordAtom; nextIndex: number } | undefined {
+  let cursor = index + 1;
+  const pitchesMidi: number[] = [];
+
+  while (cursor < bodyText.length && bodyText[cursor] !== "]") {
+    if (/\s/.test(bodyText[cursor])) {
+      cursor += 1;
+      continue;
+    }
+
+    const accidentalStart = cursor;
+    let accidentalOffset: number | undefined;
+
+    if (bodyText[cursor] === "^" || bodyText[cursor] === "_" || bodyText[cursor] === "=") {
+      const accidentalSymbol = bodyText[cursor];
+      let accidentalCount = 0;
+
+      while (bodyText[cursor] === accidentalSymbol) {
+        accidentalCount += 1;
+        cursor += 1;
+      }
+
+      accidentalOffset = accidentalSymbol === "=" ? 0 : accidentalSymbol === "^" ? accidentalCount : -accidentalCount;
+    }
+
+    const pitchChar = bodyText[cursor];
+
+    if (!pitchChar || !/[A-Ga-g]/.test(pitchChar)) {
+      diagnostics.push(blockingDiagnostic(
+        "internal-invalid-chord-note",
+        "Internal engine only supports note letters, accidentals, and octave markers inside block chords.",
+        line,
+        column + (accidentalStart - index),
+      ));
+      return undefined;
+    }
+
+    cursor += 1;
+    let octaveDelta = 0;
+
+    while (bodyText[cursor] === "'" || bodyText[cursor] === ",") {
+      octaveDelta += bodyText[cursor] === "'" ? 12 : -12;
+      cursor += 1;
+    }
+
+    if (/[0-9/]/.test(bodyText[cursor] ?? "")) {
+      diagnostics.push(blockingDiagnostic(
+        "internal-unsupported-mixed-duration-chord",
+        "Internal engine does not support inner chord notes with their own duration modifiers.",
+        line,
+        column + (cursor - index),
+      ));
+      return undefined;
+    }
+
+    const noteLetter = pitchChar.toUpperCase();
+    const resolvedAccidental = accidentalOffset
+      ?? barAccidentals.get(noteLetter)
+      ?? keyAccidentals.get(noteLetter)
+      ?? 0;
+
+    if (accidentalOffset !== undefined) {
+      barAccidentals.set(noteLetter, accidentalOffset);
+    }
+
+    pitchesMidi.push(pitchCharToMidi(pitchChar) + octaveDelta + resolvedAccidental);
+  }
+
+  if (cursor >= bodyText.length || bodyText[cursor] !== "]") {
+    diagnostics.push(blockingDiagnostic(
+      "internal-unterminated-chord",
+      "Internal engine found a block chord without a closing `]`.",
+      line,
+      column,
+    ));
+    return undefined;
+  }
+
+  if (pitchesMidi.length === 0) {
+    diagnostics.push(blockingDiagnostic(
+      "internal-empty-chord",
+      "Internal engine found an empty block chord.",
+      line,
+      column,
+    ));
+    return undefined;
+  }
+
+  cursor += 1;
+  const lengthStart = cursor;
+  while (/[0-9/]/.test(bodyText[cursor] ?? "")) {
+    cursor += 1;
+  }
+
+  const rawLength = bodyText.slice(lengthStart, cursor);
+  const durationMultiplier = parseLengthMultiplier(rawLength, line, column, diagnostics);
+
+  if (!durationMultiplier) {
+    return undefined;
+  }
+
+  if (bodyText[cursor] === "-") {
+    diagnostics.push(blockingDiagnostic(
+      "internal-unsupported-chord-tie",
+      "Internal engine does not support ties into or out of block chords.",
+      line,
+      column,
+    ));
+    return undefined;
+  }
+
+  return {
+    atom: {
+      kind: "chord",
+      pitchesMidi,
+      durationWhole: multiplyRational(defaultNoteLength, durationMultiplier),
+      sourceLine: line,
+      sourceColumn: column,
+      chordId: `chord-${chordCounter}`,
+    },
+    nextIndex: cursor,
+  };
 }
 
 function parseRationalHeader(value: string | undefined): Rational | undefined {
@@ -619,45 +953,37 @@ function parseLengthMultiplier(
   }
 
   const numeratorMatch = rawLength.match(/^(\d+)$/);
-
   if (numeratorMatch) {
     return createRational(Number(numeratorMatch[1]), 1);
   }
 
   const fractionMatch = rawLength.match(/^(\d+)\/(\d+)$/);
-
   if (fractionMatch) {
     return createRational(Number(fractionMatch[1]), Number(fractionMatch[2]));
   }
 
   const trailingSlashMatch = rawLength.match(/^(\d+)\/+$/);
-
   if (trailingSlashMatch) {
     const slashCount = rawLength.length - trailingSlashMatch[1].length;
     return createRational(Number(trailingSlashMatch[1]), 2 ** slashCount);
   }
 
   const leadingSlashDigitsMatch = rawLength.match(/^\/(\d+)$/);
-
   if (leadingSlashDigitsMatch) {
     return createRational(1, Number(leadingSlashDigitsMatch[1]));
   }
 
   const slashOnlyMatch = rawLength.match(/^\/+$/);
-
   if (slashOnlyMatch) {
     return createRational(1, 2 ** rawLength.length);
   }
 
-  diagnostics.push({
-    code: "internal-invalid-note-length",
-    severity: "error",
-    message: `Internal engine could not parse the note length token \`${rawLength}\`.`,
+  diagnostics.push(blockingDiagnostic(
+    "internal-invalid-note-length",
+    `Internal engine could not parse the note length token \`${rawLength}\`.`,
     line,
     column,
-    blocked: true,
-  });
-
+  ));
   return undefined;
 }
 
@@ -682,16 +1008,50 @@ function pitchCharToMidi(pitchChar: string): number {
   return pitchMap[pitchChar];
 }
 
-function unsupportedDiagnostic(
+function collectMarkerIndices(items: BodyItem[], kind: BodyMarkerKind): number[] {
+  const indices: number[] = [];
+
+  for (const [index, item] of items.entries()) {
+    if (!isAtom(item) && item.kind === kind) {
+      indices.push(index);
+    }
+  }
+
+  return indices;
+}
+
+function extractAtoms(items: BodyItem[]): BodyAtom[] {
+  return items.filter(isAtom);
+}
+
+function isAtom(item: BodyItem): item is BodyAtom {
+  return item.kind === "note" || item.kind === "rest" || item.kind === "chord";
+}
+
+function indexToLineColumn(
+  text: string,
+  index: number,
+  bodyStartLine: number,
+): { line: number; column: number } {
+  const before = text.slice(0, index);
+  const lineBreaks = before.split("\n");
+
+  return {
+    line: bodyStartLine + lineBreaks.length - 1,
+    column: lineBreaks[lineBreaks.length - 1].length + 1,
+  };
+}
+
+function blockingDiagnostic(
   code: string,
-  construct: string,
-  line: number,
-  column: number,
+  message: string,
+  line?: number,
+  column?: number,
 ): Diagnostic {
   return {
     code,
     severity: "error",
-    message: `Internal engine does not support ${construct} yet.`,
+    message,
     line,
     column,
     blocked: true,

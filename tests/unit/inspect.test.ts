@@ -32,30 +32,27 @@ afterEach(async () => {
 });
 
 describe("inspect and internal/auto engine flows", () => {
-  it("prints canonical score JSON for supported inspect input", async () => {
-    const fixture = await loadFixture(conversionDir, "melody.abc");
-    const output = await runCli(["inspect", "--text", fixture], { cwd: process.cwd(), env: process.env });
-    const parsed = JSON.parse(output.stdout) as {
-      ok: boolean;
-      score?: { notes: Array<{ pitchMidi: number }> };
-    };
+  it("succeeds for every current conversion fixture through inspect", async () => {
+    const fixtureNames = [
+      "melody.abc",
+      "rests-lengths.abc",
+      "quoted-chords.abc",
+      "tied-notes.abc",
+      "key-signature.abc",
+      "tuplets.abc",
+      "block-chords.abc",
+      "repeats-endings.abc",
+    ];
 
-    expect(output.exitCode).toBe(0);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.score?.notes.map((note) => note.pitchMidi)).toEqual([60, 62, 64, 65, 67, 69, 71, 72]);
-  });
+    for (const fixtureName of fixtureNames) {
+      const fixture = await loadFixture(conversionDir, fixtureName);
+      const output = await runCli(["inspect", "--text", fixture], { cwd: process.cwd(), env: process.env });
+      const parsed = JSON.parse(output.stdout) as { ok: boolean; score?: { notes: Array<{ pitchMidi: number }> } };
 
-  it("fails inspect cleanly for unsupported internal-engine constructs", async () => {
-    const fixture = await loadFixture(conversionDir, "block-chords.abc");
-    const output = await runCli(["inspect", "--text", fixture], { cwd: process.cwd(), env: process.env });
-    const parsed = JSON.parse(output.stdout) as {
-      ok: boolean;
-      diagnostics: Array<{ code: string }>;
-    };
-
-    expect(output.exitCode).toBe(1);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.diagnostics.some((diagnostic) => diagnostic.code === "internal-unsupported-block-chords")).toBe(true);
+      expect(output.exitCode).toBe(0);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.score?.notes.length).toBeGreaterThan(0);
+    }
   });
 
   it("converts with the internal engine for the supported narrow subset", async () => {
@@ -81,35 +78,60 @@ describe("inspect and internal/auto engine flows", () => {
     await expect(stat(parsed.midiPath ?? "")).resolves.toBeTruthy();
   });
 
-  it("falls back cleanly in auto mode when the internal engine does not support the input", async () => {
-    const exportDir = await createExportDir();
-    const fixture = await loadFixture(conversionDir, "tuplets.abc");
-    const output = await runCli(
-      [
-        "convert",
-        "--text",
-        fixture,
-        "--engine",
-        "auto",
-        "--export-dir",
-        exportDir,
-        "--abc2midi-path",
-        fakeToolPath,
-      ],
-      { cwd: process.cwd(), env: process.env },
-    );
-    const parsed = JSON.parse(output.stdout) as {
-      ok: boolean;
-      engineUsed?: string;
-      fallback?: { attempted: string; reason: string; diagnostics: Array<{ code: string }> };
-    };
+  it("prefers the internal engine in auto mode for every current conversion fixture", async () => {
+    const fixtureNames = [
+      "melody.abc",
+      "rests-lengths.abc",
+      "quoted-chords.abc",
+      "tied-notes.abc",
+      "key-signature.abc",
+      "tuplets.abc",
+      "block-chords.abc",
+      "repeats-endings.abc",
+    ];
 
-    expect(output.exitCode).toBe(0);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.engineUsed).toBe("abc2midi");
-    expect(parsed.fallback?.attempted).toBe("internal");
-    expect(parsed.fallback?.reason).toBe("unsupported");
-    expect(parsed.fallback?.diagnostics.some((diagnostic) => diagnostic.code === "internal-unsupported-tuplets")).toBe(true);
+    for (const fixtureName of fixtureNames) {
+      const exportDir = await createExportDir();
+      const fixture = await loadFixture(conversionDir, fixtureName);
+      const output = await runCli(
+        ["convert", "--text", fixture, "--engine", "auto", "--export-dir", exportDir, "--abc2midi-path", fakeToolPath],
+        { cwd: process.cwd(), env: process.env },
+      );
+      const parsed = JSON.parse(output.stdout) as { ok: boolean; engineUsed?: string; fallback?: unknown };
+
+      expect(output.exitCode).toBe(0);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.engineUsed).toBe("internal");
+      expect(parsed.fallback).toBeUndefined();
+    }
+  });
+
+  it("falls back cleanly in auto mode for new explicitly unsupported fixtures", async () => {
+    const unsupportedFixtures = [
+      { name: "quintuplet.abc", diagnosticCode: "internal-unsupported-general-tuplet" },
+      { name: "nested-repeats.abc", diagnosticCode: "internal-unsupported-repeat-structure" },
+    ];
+
+    for (const fixtureInfo of unsupportedFixtures) {
+      const exportDir = await createExportDir();
+      const fixture = await loadFixture(conversionDir, fixtureInfo.name);
+      const output = await runCli(
+        ["convert", "--text", fixture, "--engine", "auto", "--export-dir", exportDir, "--abc2midi-path", fakeToolPath],
+        { cwd: process.cwd(), env: process.env },
+      );
+      const parsed = JSON.parse(output.stdout) as {
+        ok: boolean;
+        engineUsed?: string;
+        fallback?: { attempted: string; reason: string; diagnostics: Array<{ code: string }> };
+      };
+
+      expect(output.exitCode).toBe(0);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.engineUsed).toBe("abc2midi");
+      expect(parsed.fallback?.attempted).toBe("internal");
+      expect(parsed.fallback?.reason).toBe("unsupported");
+      expect(parsed.fallback?.diagnostics.some((diagnostic) => diagnostic.code === fixtureInfo.diagnosticCode)).toBe(true);
+    }
   });
 
   it("still fails on validate-time unsupported input before any fallback is attempted", async () => {

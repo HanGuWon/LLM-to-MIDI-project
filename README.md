@@ -8,7 +8,7 @@ Windows-first local CLI for a deterministic `ABC -> canonical score -> MIDI` wor
 - Normalize only safe defaults and cleanup.
 - Normalize raw pasted ABC into a stable intermediate form.
 - Inspect a canonical internal score model.
-- Convert either through the narrow internal engine or through `abc2midi`.
+- Convert either through the broader internal engine or through `abc2midi`.
 - Export a deterministic `.mid` file for FL Studio import.
 
 This phase intentionally does **not** include a JUCE plugin, live MIDI/Burn flow, or an FL Piano Roll script bridge.
@@ -73,7 +73,7 @@ exports/<title-or-imported-fragment>-<8charhash>.mid
 `convert` engine behavior:
 
 - `--engine abc2midi`: preserve the original Phase 0 behavior.
-- `--engine internal`: require the internal MVP subset and write MIDI from the canonical score model.
+- `--engine internal`: require the currently supported internal subset and write MIDI from the canonical score model.
 - `--engine auto`: try the internal engine first, then fall back to `abc2midi` for unsupported constructs.
 
 If `--engine` is omitted, `convert` defaults to `abc2midi` to preserve the original workflow.
@@ -91,20 +91,31 @@ Supported now:
 - explicit note lengths including integers, fractions, and slash forms
 - simple barlines for accidental reset / position tracking
 - ties between immediately adjacent identical pitches
+- standard `(3` triplets
+- simple block chords such as `[CEG]` with one shared outer duration
+- one-level repeats and first/second endings in the current fixture style
 - quoted chord symbols ignored as playback metadata
 - `K:none`
 - common major/minor key signatures for implied accidentals within a bar
 
 Still routed to fallback or rejected by the internal engine:
 
-- tuplets
-- repeats and first/second endings
-- block chords such as `[CEG]`
+- generalized tuplets such as `(2`, `(4)`, `(5)` and extended forms like `(3:2:2`
+- nested or multi-region repeats
+- ambiguous repeat/ending layouts outside the current one-level scope
+- block chords mixed with tuplets
+- block chords with inner mixed durations
+- ties into or out of block chords
 - multiple voices
 - `P:` parts
 - inline body field changes
 - lyrics
 - microtones
+
+Examples that still fall back cleanly in `--engine auto`:
+
+- `tests/fixtures/conversion/quintuplet.abc`
+- `tests/fixtures/conversion/nested-repeats.abc`
 
 ## FL Studio manual smoke flow
 

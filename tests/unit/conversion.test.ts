@@ -32,7 +32,7 @@ afterEach(async () => {
 });
 
 describe("convert command", () => {
-  it("converts the supported fixture set through the external tool boundary", async () => {
+  it("keeps the external abc2midi conversion path working", async () => {
     const fixtureNames = [
       "melody.abc",
       "rests-lengths.abc",
@@ -60,7 +60,80 @@ describe("convert command", () => {
 
       expect(exitCode).toBe(0);
       expect(result.ok).toBe(true);
+      expect(result.engineUsed).toBe("abc2midi");
       expect(result.midiPath).toBeDefined();
+      await expect(stat(result.midiPath ?? "")).resolves.toBeTruthy();
+    }
+  });
+
+  it("converts all current fixtures through the internal engine", async () => {
+    const fixtureNames = [
+      "melody.abc",
+      "rests-lengths.abc",
+      "quoted-chords.abc",
+      "tied-notes.abc",
+      "key-signature.abc",
+      "tuplets.abc",
+      "block-chords.abc",
+      "repeats-endings.abc",
+    ];
+
+    for (const fixtureName of fixtureNames) {
+      const exportDir = await createExportDir();
+      const fixture = await loadFixture(conversionDir, fixtureName);
+      const { result, exitCode } = await runConvertCommand(
+        {
+          command: "convert",
+          text: fixture,
+          engine: "internal",
+          exportDir,
+        },
+        {
+          cwd: process.cwd(),
+          env: process.env,
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(result.ok).toBe(true);
+      expect(result.engineUsed).toBe("internal");
+      await expect(stat(result.midiPath ?? "")).resolves.toBeTruthy();
+    }
+  });
+
+  it("prefers the internal engine in auto mode for all current fixtures", async () => {
+    const fixtureNames = [
+      "melody.abc",
+      "rests-lengths.abc",
+      "quoted-chords.abc",
+      "tied-notes.abc",
+      "key-signature.abc",
+      "tuplets.abc",
+      "block-chords.abc",
+      "repeats-endings.abc",
+    ];
+
+    for (const fixtureName of fixtureNames) {
+      const exportDir = await createExportDir();
+      const fixture = await loadFixture(conversionDir, fixtureName);
+      const { result, exitCode } = await runConvertCommand(
+        {
+          command: "convert",
+          text: fixture,
+          engine: "auto",
+          exportDir,
+          abc2midiPath: fakeToolPath,
+        },
+        {
+          cwd: process.cwd(),
+          env: process.env,
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(result.ok).toBe(true);
+      expect(result.engineUsed).toBe("internal");
+      expect(result.fallback).toBeUndefined();
       await expect(stat(result.midiPath ?? "")).resolves.toBeTruthy();
     }
   });
@@ -141,5 +214,35 @@ describe("convert command", () => {
     expect(output.exitCode).toBe(1);
     const parsed = JSON.parse(output.stdout) as { ok: boolean };
     expect(parsed.ok).toBe(false);
+  });
+
+  it("still falls back to abc2midi in auto mode for newly unsupported fixtures", async () => {
+    const fixtures = [
+      { name: "quintuplet.abc", diagnosticCode: "internal-unsupported-general-tuplet" },
+      { name: "nested-repeats.abc", diagnosticCode: "internal-unsupported-repeat-structure" },
+    ];
+
+    for (const fixtureInfo of fixtures) {
+      const exportDir = await createExportDir();
+      const fixture = await loadFixture(conversionDir, fixtureInfo.name);
+      const { result, exitCode } = await runConvertCommand(
+        {
+          command: "convert",
+          text: fixture,
+          engine: "auto",
+          exportDir,
+          abc2midiPath: fakeToolPath,
+        },
+        {
+          cwd: process.cwd(),
+          env: process.env,
+        },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(result.ok).toBe(true);
+      expect(result.engineUsed).toBe("abc2midi");
+      expect(result.fallback?.diagnostics.some((diagnostic) => diagnostic.code === fixtureInfo.diagnosticCode)).toBe(true);
+    }
   });
 });
