@@ -1,17 +1,16 @@
 {
-  "name": "llm-midi",
+  "name": "llm-midi-worker",
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "llm-midi": "./dist/index.js"
+    "llm-midi-worker": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@llm-midi/abc-core": "file:../../packages/abc-core",
     "@llm-midi/engine-service": "file:../../packages/engine-service",
-    "@llm-midi/midi-smf": "file:../../packages/midi-smf"
+    "@llm-midi/worker-protocol": "file:../../packages/worker-protocol"
   }
 }

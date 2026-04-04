@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { validateAbc } from "@llm-midi/abc-core";
+import { runCli } from "../../apps/cli/src/cli.js";
 
 const validationDir = path.resolve(process.cwd(), "tests/fixtures/validation");
 
@@ -79,5 +80,18 @@ describe("validateAbc", () => {
     expect(result.ok).toBe(false);
     expect(result.unsupportedConstructs).toContain("multiple voices");
     expect(result.diagnostics.some((diagnostic) => diagnostic.code === "unsupported-voices")).toBe(true);
+  });
+
+  it("keeps the validate CLI command working unchanged", async () => {
+    const fixturePath = path.join(validationDir, "clean-tune.abc");
+    const output = await runCli(["validate", "--input", fixturePath], {
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    const parsed = JSON.parse(output.stdout) as { ok: boolean; normalizedAbc: string };
+
+    expect(output.exitCode).toBe(0);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.normalizedAbc).toContain("Q:1/4=120");
   });
 });

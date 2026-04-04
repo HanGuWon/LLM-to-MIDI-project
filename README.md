@@ -1,6 +1,6 @@
 # LLM to MIDI Project
 
-Windows-first local CLI for a deterministic `ABC -> canonical score -> MIDI` workflow, with `abc2midi` preserved as an external fallback/export path.
+Windows-first local tooling for a deterministic `ABC -> canonical score -> MIDI` workflow, with `abc2midi` preserved as an external fallback/export path and a local stdio worker boundary prepared for a future plugin shell.
 
 ## Scope
 
@@ -9,6 +9,7 @@ Windows-first local CLI for a deterministic `ABC -> canonical score -> MIDI` wor
 - Normalize raw pasted ABC into a stable intermediate form.
 - Inspect a canonical internal score model.
 - Convert either through the broader internal engine or through `abc2midi`.
+- Route orchestration either directly in-process or through a local stdio worker.
 - Export a deterministic `.mid` file for FL Studio import.
 
 This phase intentionally does **not** include a JUCE plugin, live MIDI/Burn flow, or an FL Piano Roll script bridge.
@@ -29,6 +30,26 @@ npm install
 npm run build
 npm test
 ```
+
+## Architecture
+
+The repo is now split into four layers:
+
+- pure notation/music logic in `packages/abc-core`, `packages/score-model`, and `packages/midi-smf`
+- orchestration in `packages/engine-service`
+- local child-process protocol in `packages/worker-protocol`
+- user-facing CLI in `apps/cli`
+
+There is also a local-only worker app in `apps/worker`.
+
+The worker is intentionally:
+
+- stdio-based
+- newline-delimited JSON
+- local child-process only
+- sequential
+
+It is **not** an HTTP server, WebSocket server, gRPC service, or browser-based component.
 
 ## Usage
 
@@ -77,6 +98,36 @@ exports/<title-or-imported-fragment>-<8charhash>.mid
 - `--engine auto`: try the internal engine first, then fall back to `abc2midi` for unsupported constructs.
 
 If `--engine` is omitted, `convert` defaults to `abc2midi` to preserve the original workflow.
+
+## Local worker for development
+
+The CLI remains the default user-facing entry point in this slice. It still calls the service layer directly in-process by default.
+
+For development, you can run the long-lived worker manually after a build:
+
+```powershell
+npm run worker
+```
+
+Or run it from source:
+
+```powershell
+npm run worker:dev
+```
+
+The worker accepts one JSON request per line on stdin and emits exactly one JSON response line on stdout. Human-readable logs belong on stderr only.
+
+Example request:
+
+```json
+{"id":"1","protocolVersion":"v1","kind":"ping"}
+```
+
+Example convert request:
+
+```json
+{"id":"2","protocolVersion":"v1","kind":"convert","abcText":"C D E F |","engine":"internal","includeMidiBase64":true}
+```
 
 ## Internal engine subset
 
@@ -127,10 +178,13 @@ Examples that still fall back cleanly in `--engine auto`:
 ## Project layout
 
 ```text
-apps/cli            CLI entrypoint and process integration
-packages/abc-core   normalization, diagnostics, and strict normalized-ABC parsing
-packages/score-model canonical internal score types and rational helpers
-packages/midi-smf   deterministic Standard MIDI File writer
-tests/              fixture-driven validation and conversion tests
-docs/adr/           architecture decisions
+apps/cli                 CLI entrypoint, argument parsing, file I/O
+apps/worker              long-running local stdio worker
+packages/abc-core        normalization, diagnostics, and strict normalized-ABC parsing
+packages/score-model     canonical internal score types and rational helpers
+packages/midi-smf        deterministic Standard MIDI File writer
+packages/engine-service  reusable validate/inspect/convert orchestration
+packages/worker-protocol versioned JSON request/response types for the worker
+tests/                   fixture-driven validation, conversion, and worker tests
+docs/adr/                architecture decisions
 ```

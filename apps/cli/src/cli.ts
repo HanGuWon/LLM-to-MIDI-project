@@ -1,22 +1,19 @@
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
 
-import {
-  getNormalizedTitle,
-  type ConvertResult,
-  type Diagnostic,
-  type InspectResult,
-  parseNormalizedAbcToCanonicalScore,
-  type ValidateResult,
-  validateAbc,
+import type {
+  ConvertResult,
+  InspectResult,
+  ValidateResult,
 } from "@llm-midi/abc-core";
-import { writeCanonicalScoreToMidiBuffer } from "@llm-midi/midi-smf";
+import {
+  convertAbcText,
+  type EngineName,
+  inspectAbcText,
+  validateAbcText,
+} from "@llm-midi/engine-service";
 
 type CommandName = "validate" | "convert" | "inspect";
-type EngineName = "abc2midi" | "internal" | "auto";
 
 type ParsedArgs = {
   command?: CommandName;
@@ -35,14 +32,6 @@ type CliOutput = {
 type CliContext = {
   cwd: string;
   env: NodeJS.ProcessEnv;
-};
-
-type ToolResult = {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-  midiBuffer?: Buffer;
-  diagnostics: Diagnostic[];
 };
 
 export async function runCli(
@@ -95,7 +84,35 @@ export async function runValidateCommand(
     return abcText;
   }
 
-  return validateAbc(abcText);
+  return validateAbcText(abcText);
+}
+
+export async function runInspectCommand(
+  args: ParsedArgs,
+  cwd: string,
+): Promise<{ result: InspectResult; exitCode: number }> {
+  const abcText = await readInput(args, cwd);
+
+  if (typeof abcText !== "string") {
+    return {
+      result: {
+        ok: false,
+        diagnostics: abcText.diagnostics,
+      },
+      exitCode: 1,
+    };
+  }
+
+  const inspected = inspectAbcText(abcText);
+
+  return {
+    result: {
+      ok: inspected.ok,
+      diagnostics: inspected.diagnostics,
+      score: inspected.score,
+    },
+    exitCode: inspected.ok ? 0 : 1,
+  };
 }
 
 export async function runConvertCommand(
@@ -116,189 +133,41 @@ export async function runConvertCommand(
     };
   }
 
-  const validation = validateAbc(abcText);
-  const engine = args.engine ?? "abc2midi";
+  const converted = await convertAbcText(abcText, {
+    engine: args.engine,
+    abc2midiPath: args.abc2midiPath,
+    env: context.env,
+  });
 
-  if (!validation.ok) {
+  if (!converted.ok || !converted.midiBuffer || !converted.exportPlan) {
     return {
       result: {
         ok: false,
-        diagnostics: validation.diagnostics,
-        toolStdout: "",
-        toolStderr: "",
-        engineUsed: engine === "auto" ? undefined : engine,
+        diagnostics: converted.diagnostics,
+        toolStdout: converted.toolStdout,
+        toolStderr: converted.toolStderr,
+        engineUsed: converted.engineUsed,
+        fallback: converted.fallback,
       },
       exitCode: 1,
     };
   }
 
-  if (engine === "internal") {
-    return runInternalConvert(validation, context.cwd, args.exportDir);
-  }
-
-  if (engine === "auto") {
-    const internal = parseNormalizedAbcToCanonicalScore(
-      validation.normalizedAbc,
-      validation.classification,
-      validation.diagnostics,
-    );
-
-    if (internal.ok && internal.score) {
-      return writeInternalMidiResult(validation.normalizedAbc, internal.score, context.cwd, args.exportDir);
-    }
-
-    const fallback = await runAbc2MidiConvert(validation, context, args);
-    return {
-      exitCode: fallback.exitCode,
-      result: {
-        ...fallback.result,
-        fallback: {
-          attempted: "internal",
-          reason: "unsupported",
-          diagnostics: internal.diagnostics.filter((diagnostic) => diagnostic.blocked),
-        },
-      },
-    };
-  }
-
-  return runAbc2MidiConvert(validation, context, args);
-}
-
-export async function runInspectCommand(
-  args: ParsedArgs,
-  cwd: string,
-): Promise<{ result: InspectResult; exitCode: number }> {
-  const abcText = await readInput(args, cwd);
-
-  if (typeof abcText !== "string") {
-    return {
-      result: {
-        ok: false,
-        diagnostics: abcText.diagnostics,
-      },
-      exitCode: 1,
-    };
-  }
-
-  const validation = validateAbc(abcText);
-
-  if (!validation.ok) {
-    return {
-      result: {
-        ok: false,
-        diagnostics: validation.diagnostics,
-      },
-      exitCode: 1,
-    };
-  }
-
-  const internal = parseNormalizedAbcToCanonicalScore(
-    validation.normalizedAbc,
-    validation.classification,
-    validation.diagnostics,
-  );
-
-  return {
-    result: {
-      ok: internal.ok,
-      diagnostics: internal.diagnostics,
-      score: internal.score,
-    },
-    exitCode: internal.ok ? 0 : 1,
-  };
-}
-
-async function runInternalConvert(
-  validation: ValidateResult,
-  cwd: string,
-  exportDirArg?: string,
-): Promise<{ result: ConvertResult; exitCode: number }> {
-  const internal = parseNormalizedAbcToCanonicalScore(
-    validation.normalizedAbc,
-    validation.classification,
-    validation.diagnostics,
-  );
-
-  if (!internal.ok || !internal.score) {
-    return {
-      result: {
-        ok: false,
-        diagnostics: internal.diagnostics,
-        toolStdout: "",
-        toolStderr: "",
-        engineUsed: "internal",
-      },
-      exitCode: 1,
-    };
-  }
-
-  return writeInternalMidiResult(validation.normalizedAbc, internal.score, cwd, exportDirArg);
-}
-
-async function runAbc2MidiConvert(
-  validation: ValidateResult,
-  context: CliContext,
-  args: ParsedArgs,
-): Promise<{ result: ConvertResult; exitCode: number }> {
   const exportDir = path.resolve(context.cwd, args.exportDir ?? "exports");
-  const toolPath = args.abc2midiPath ?? context.env.ABC2MIDI_PATH ?? "abc2midi";
-  const toolRun = await runAbc2Midi(validation.normalizedAbc, toolPath);
-  const diagnostics = [...validation.diagnostics, ...toolRun.diagnostics];
-
-  if (!toolRun.ok || !toolRun.midiBuffer) {
-    return {
-      result: {
-        ok: false,
-        diagnostics,
-        toolStdout: toolRun.stdout,
-        toolStderr: toolRun.stderr,
-        engineUsed: "abc2midi",
-      },
-      exitCode: 1,
-    };
-  }
-
-  const title = getNormalizedTitle(validation.normalizedAbc);
-  const fileName = `${slugify(title)}-${createContentHash(validation.normalizedAbc)}.mid`;
-  const midiPath = path.join(exportDir, fileName);
+  const midiPath = path.join(exportDir, converted.exportPlan.suggestedFileName);
 
   await fs.mkdir(exportDir, { recursive: true });
-  await fs.writeFile(midiPath, toolRun.midiBuffer);
+  await fs.writeFile(midiPath, converted.midiBuffer);
 
   return {
     result: {
       ok: true,
       midiPath,
-      diagnostics,
-      toolStdout: toolRun.stdout,
-      toolStderr: toolRun.stderr,
-      engineUsed: "abc2midi",
-    },
-    exitCode: 0,
-  };
-}
-
-async function writeInternalMidiResult(
-  normalizedAbc: string,
-  score: NonNullable<InspectResult["score"]>,
-  cwd: string,
-  exportDirArg?: string,
-): Promise<{ result: ConvertResult; exitCode: number }> {
-  const exportDir = path.resolve(cwd, exportDirArg ?? "exports");
-  const fileName = `${slugify(getNormalizedTitle(normalizedAbc))}-${createContentHash(normalizedAbc)}.mid`;
-  const midiPath = path.join(exportDir, fileName);
-
-  await fs.mkdir(exportDir, { recursive: true });
-  await fs.writeFile(midiPath, writeCanonicalScoreToMidiBuffer(score));
-
-  return {
-    result: {
-      ok: true,
-      midiPath,
-      diagnostics: score.diagnostics,
-      toolStdout: "",
-      toolStderr: "",
-      engineUsed: "internal",
+      diagnostics: converted.diagnostics,
+      toolStdout: converted.toolStdout,
+      toolStderr: converted.toolStderr,
+      engineUsed: converted.engineUsed,
+      fallback: converted.fallback,
     },
     exitCode: 0,
   };
@@ -367,144 +236,6 @@ async function readInput(args: ParsedArgs, cwd: string): Promise<string | Valida
   }
 }
 
-async function runAbc2Midi(normalizedAbc: string, toolPath: string): Promise<ToolResult> {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "llm-midi-"));
-  const inputPath = path.join(tempDir, "input.abc");
-  const midiTempPath = path.join(tempDir, "output.mid");
-
-  try {
-    await fs.writeFile(inputPath, normalizedAbc, "utf8");
-
-    const { command, args } = resolveToolInvocation(toolPath);
-    const childArgs = [...args, inputPath, "-o", midiTempPath];
-    const stdoutChunks: string[] = [];
-    const stderrChunks: string[] = [];
-
-    const exitCode = await new Promise<number>((resolve) => {
-      const child = spawn(command, childArgs, {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-
-      child.stdout.on("data", (chunk) => {
-        stdoutChunks.push(String(chunk));
-      });
-
-      child.stderr.on("data", (chunk) => {
-        stderrChunks.push(String(chunk));
-      });
-
-      child.on("error", () => {
-        resolve(-1);
-      });
-
-      child.on("close", (code) => {
-        resolve(code ?? 0);
-      });
-    });
-
-    const stdout = stdoutChunks.join("").trim();
-    const stderr = stderrChunks.join("").trim();
-    const diagnostics: Diagnostic[] = [];
-
-    if (stdout) {
-      diagnostics.push({
-        code: "abc2midi-stdout",
-        severity: "info",
-        message: `abc2midi stdout: ${stdout}`,
-        blocked: false,
-      });
-    }
-
-    if (stderr) {
-      diagnostics.push({
-        code: "abc2midi-stderr",
-        severity: exitCode === 0 ? "warning" : "error",
-        message: `abc2midi stderr: ${stderr}`,
-        blocked: exitCode !== 0,
-      });
-    }
-
-    if (exitCode === -1) {
-      return {
-        ok: false,
-        stdout,
-        stderr,
-        diagnostics: [
-          ...diagnostics,
-          {
-            code: "abc2midi-not-found",
-            severity: "error",
-            message: `Unable to launch abc2midi from \`${toolPath}\`.`,
-            blocked: true,
-          },
-        ],
-      };
-    }
-
-    if (exitCode !== 0) {
-      return {
-        ok: false,
-        stdout,
-        stderr,
-        diagnostics: [
-          ...diagnostics,
-          {
-            code: "abc2midi-failed",
-            severity: "error",
-            message: `abc2midi exited with code ${exitCode}.`,
-            blocked: true,
-          },
-        ],
-      };
-    }
-
-    try {
-      await fs.access(midiTempPath);
-    } catch {
-      return {
-        ok: false,
-        stdout,
-        stderr,
-        diagnostics: [
-          ...diagnostics,
-          {
-            code: "missing-midi-output",
-            severity: "error",
-            message: "abc2midi completed without producing the expected MIDI file.",
-            blocked: true,
-          },
-        ],
-      };
-    }
-
-    return {
-      ok: true,
-      stdout,
-      stderr,
-      midiBuffer: await fs.readFile(midiTempPath),
-      diagnostics,
-    };
-  } finally {
-    await fs.rm(tempDir, { recursive: true, force: true });
-  }
-}
-
-function resolveToolInvocation(toolPath: string): { command: string; args: string[] } {
-  const extension = path.extname(toolPath).toLowerCase();
-
-  if (extension === ".js" || extension === ".mjs" || extension === ".cjs") {
-    return {
-      command: process.execPath,
-      args: [toolPath],
-    };
-  }
-
-  return {
-    command: toolPath,
-    args: [],
-  };
-}
-
 function buildUsageError(message: string): ValidateResult {
   return {
     ok: false,
@@ -520,17 +251,4 @@ function buildUsageError(message: string): ValidateResult {
       },
     ],
   };
-}
-
-function slugify(input: string): string {
-  const slug = input
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-
-  return slug || "imported-fragment";
-}
-
-function createContentHash(input: string): string {
-  return createHash("sha256").update(input).digest("hex").slice(0, 8);
 }
