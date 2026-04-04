@@ -7,6 +7,7 @@ import {
   type ProtocolVersion,
   type RequestKind,
   type WorkerErrorResponse,
+  type WorkerReadyEvent,
   type WorkerRequest,
   type WorkerResponse,
   type WorkerSuccessResponse,
@@ -31,9 +32,11 @@ export {
   type WorkerErrorResponse,
   type WorkerExportPlanMetadata,
   type WorkerInspectResult,
+  type WorkerReadyEvent,
   type WorkerRequest,
   type WorkerResponse,
   type WorkerSuccessResponse,
+  type WorkerTransportKind,
 } from "./types.js";
 
 const REQUEST_KINDS: RequestKind[] = ["ping", "validate", "inspect", "convert", "shutdown"];
@@ -91,5 +94,32 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
     && typeof candidate.protocolVersion === "string"
     && typeof candidate.kind === "string"
     && typeof candidate.ok === "boolean"
+  );
+}
+
+export function createReadyEvent(path: string): WorkerReadyEvent {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    kind: "ready",
+    transport: "pipe",
+    endpoint: {
+      type: "pipe",
+      path,
+    },
+  };
+}
+
+export function isWorkerReadyEvent(value: unknown): value is WorkerReadyEvent {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Partial<WorkerReadyEvent>;
+  return (
+    candidate.protocolVersion === PROTOCOL_VERSION
+    && candidate.kind === "ready"
+    && candidate.transport === "pipe"
+    && typeof candidate.endpoint?.path === "string"
+    && candidate.endpoint?.type === "pipe"
   );
 }

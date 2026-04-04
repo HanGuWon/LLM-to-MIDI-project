@@ -10,15 +10,17 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @llm-midi/score-model && npm run build -w @llm-midi/midi-smf && npm run build -w @llm-midi/abc-core && npm run build -w @llm-midi/engine-service && npm run build -w @llm-midi/worker-protocol && npm run build -w llm-midi && npm run build -w llm-midi-worker",
-    "typecheck": "npm run build -w @llm-midi/score-model && npm run build -w @llm-midi/midi-smf && npm run build -w @llm-midi/abc-core && npm run typecheck -w @llm-midi/engine-service && npm run typecheck -w @llm-midi/worker-protocol && npm run typecheck -w llm-midi && npm run typecheck -w llm-midi-worker",
+    "build": "npm run build -w @llm-midi/score-model && npm run build -w @llm-midi/midi-smf && npm run build -w @llm-midi/abc-core && npm run build -w @llm-midi/engine-service && npm run build -w @llm-midi/worker-protocol && npm run build -w @llm-midi/worker-transport && npm run build -w llm-midi && npm run build -w llm-midi-worker",
+    "typecheck": "npm run build -w @llm-midi/score-model && npm run build -w @llm-midi/midi-smf && npm run build -w @llm-midi/abc-core && npm run typecheck -w @llm-midi/engine-service && npm run typecheck -w @llm-midi/worker-protocol && npm run typecheck -w @llm-midi/worker-transport && npm run typecheck -w llm-midi && npm run typecheck -w llm-midi-worker",
     "test": "vitest run",
     "cli": "node apps/cli/dist/index.js",
     "validate": "node apps/cli/dist/index.js validate",
     "convert": "node apps/cli/dist/index.js convert",
     "inspect": "node apps/cli/dist/index.js inspect",
     "worker": "node apps/worker/dist/index.js",
-    "worker:dev": "tsx apps/worker/src/index.ts"
+    "worker:dev": "tsx apps/worker/src/index.ts",
+    "worker:pipe": "node apps/worker/dist/index.js --transport pipe",
+    "worker:pipe:dev": "tsx apps/worker/src/index.ts --transport pipe"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

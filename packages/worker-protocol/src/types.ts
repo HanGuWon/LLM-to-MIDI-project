@@ -10,6 +10,7 @@ export const PROTOCOL_VERSION = "v1";
 export type ProtocolVersion = typeof PROTOCOL_VERSION;
 export type RequestKind = "ping" | "validate" | "inspect" | "convert" | "shutdown";
 export type EngineName = "abc2midi" | "internal" | "auto";
+export type WorkerTransportKind = "stdio" | "pipe";
 
 export interface BaseRequest {
   id: string;
@@ -125,3 +126,13 @@ export interface WorkerErrorResponse {
 }
 
 export type WorkerResponse = WorkerSuccessResponse | WorkerErrorResponse;
+
+export interface WorkerReadyEvent {
+  protocolVersion: ProtocolVersion;
+  kind: "ready";
+  transport: "pipe";
+  endpoint: {
+    type: "pipe";
+    path: string;
+  };
+}

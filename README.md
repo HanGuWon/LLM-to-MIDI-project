@@ -1,6 +1,6 @@
 # LLM to MIDI Project
 
-Windows-first local tooling for a deterministic `ABC -> canonical score -> MIDI` workflow, with `abc2midi` preserved as an external fallback/export path and a local stdio worker boundary prepared for a future plugin shell.
+Windows-first local tooling for a deterministic `ABC -> canonical score -> MIDI` workflow, with `abc2midi` preserved as an external fallback/export path and local worker transports prepared for a future plugin shell.
 
 ## Scope
 
@@ -9,7 +9,7 @@ Windows-first local tooling for a deterministic `ABC -> canonical score -> MIDI`
 - Normalize raw pasted ABC into a stable intermediate form.
 - Inspect a canonical internal score model.
 - Convert either through the broader internal engine or through `abc2midi`.
-- Route orchestration either directly in-process or through a local stdio worker.
+- Route orchestration either directly in-process or through a local worker transport.
 - Export a deterministic `.mid` file for FL Studio import.
 
 This phase intentionally does **not** include a JUCE plugin, live MIDI/Burn flow, or an FL Piano Roll script bridge.
@@ -44,10 +44,11 @@ There is also a local-only worker app in `apps/worker`.
 
 The worker is intentionally:
 
-- stdio-based
-- newline-delimited JSON
-- local child-process only
+- local-only
 - sequential
+- newline-delimited JSON
+- stdio-capable
+- pipe-capable
 
 It is **not** an HTTP server, WebSocket server, gRPC service, or browser-based component.
 
@@ -103,7 +104,7 @@ If `--engine` is omitted, `convert` defaults to `abc2midi` to preserve the origi
 
 The CLI remains the default user-facing entry point in this slice. It still calls the service layer directly in-process by default.
 
-For development, you can run the long-lived worker manually after a build:
+For development, you can run the long-lived worker manually after a build in stdio mode:
 
 ```powershell
 npm run worker
@@ -115,7 +116,23 @@ Or run it from source:
 npm run worker:dev
 ```
 
-The worker accepts one JSON request per line on stdin and emits exactly one JSON response line on stdout. Human-readable logs belong on stderr only.
+The worker accepts one JSON request per line on stdin and emits exactly one JSON response line on stdout in stdio mode. Human-readable logs belong on stderr only.
+
+Pipe mode is the JUCE-oriented local IPC preparation path. On Windows this uses named-pipe style local IPC as the primary model. On POSIX, tests/dev may use a Unix domain socket path.
+
+Run the worker in pipe mode after a build:
+
+```powershell
+npm run worker:pipe
+```
+
+Or from source:
+
+```powershell
+npm run worker:pipe:dev
+```
+
+In pipe mode, stdout emits one machine-readable ready line and then request/response traffic moves onto the advertised local endpoint.
 
 Example request:
 
@@ -127,6 +144,12 @@ Example convert request:
 
 ```json
 {"id":"2","protocolVersion":"v1","kind":"convert","abcText":"C D E F |","engine":"internal","includeMidiBase64":true}
+```
+
+Example pipe-mode ready event:
+
+```json
+{"protocolVersion":"v1","kind":"ready","transport":"pipe","endpoint":{"type":"pipe","path":"\\\\.\\pipe\\llm-midi-worker-..."}}
 ```
 
 ## Internal engine subset
@@ -179,12 +202,13 @@ Examples that still fall back cleanly in `--engine auto`:
 
 ```text
 apps/cli                 CLI entrypoint, argument parsing, file I/O
-apps/worker              long-running local stdio worker
+apps/worker              long-running local stdio/pipe worker
 packages/abc-core        normalization, diagnostics, and strict normalized-ABC parsing
 packages/score-model     canonical internal score types and rational helpers
 packages/midi-smf        deterministic Standard MIDI File writer
 packages/engine-service  reusable validate/inspect/convert orchestration
 packages/worker-protocol versioned JSON request/response types for the worker
+packages/worker-transport local IPC endpoint helpers and NDJSON framing
 tests/                   fixture-driven validation, conversion, and worker tests
 docs/adr/                architecture decisions
 ```

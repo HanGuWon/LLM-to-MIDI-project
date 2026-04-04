@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { runWorker } from "./worker.js";
+import { parseWorkerArgs, runWorker } from "./worker.js";
 
-const result = await runWorker();
+const result = await runWorker(parseWorkerArgs(process.argv.slice(2)));
 process.exitCode = result.exitCode;

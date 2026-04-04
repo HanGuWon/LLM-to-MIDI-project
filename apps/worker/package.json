@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@llm-midi/engine-service": "file:../../packages/engine-service",
-    "@llm-midi/worker-protocol": "file:../../packages/worker-protocol"
+    "@llm-midi/worker-protocol": "file:../../packages/worker-protocol",
+    "@llm-midi/worker-transport": "file:../../packages/worker-transport"
   }
 }

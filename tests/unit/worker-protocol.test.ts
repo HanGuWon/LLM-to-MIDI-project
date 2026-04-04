@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createReadyEvent,
   createErrorResponse,
   createSuccessResponse,
+  isWorkerReadyEvent,
   isSupportedProtocolVersion,
   isWorkerRequestKind,
   PROTOCOL_VERSION,
@@ -29,5 +31,13 @@ describe("worker-protocol", () => {
     expect(error.ok).toBe(false);
     expect(error.error.code).toBe("bad-request");
     expect(error.error.message).toContain("Broken request");
+  });
+
+  it("builds a pipe ready event with the expected shape", () => {
+    const ready = createReadyEvent("\\\\.\\pipe\\llm-midi-test");
+
+    expect(isWorkerReadyEvent(ready)).toBe(true);
+    expect(ready.transport).toBe("pipe");
+    expect(ready.endpoint.path).toContain("llm-midi-test");
   });
 });
