@@ -14,6 +14,22 @@ Windows-first local tooling for a deterministic `ABC -> canonical score -> MIDI`
 
 This phase intentionally does **not** include a JUCE plugin, live MIDI/Burn flow, or an FL Piano Roll script bridge.
 
+## Native JUCE shell (optional)
+
+There is now an optional standalone JUCE desktop shell under `native/juce-shell`.
+
+It is intentionally:
+
+- standalone app only
+- Windows-first
+- local-only
+- not part of the default npm build/typecheck/test pipeline
+- not a VST3 target
+
+The shell launches the existing Node worker in pipe mode, consumes the existing NDJSON worker protocol over a local pipe, and writes exported MIDI files locally using the worker-provided deterministic `suggestedFileName`.
+
+See `native/juce-shell/README.md` for JUCE prerequisites and Windows CMake commands.
+
 ## Prerequisites
 
 - Node.js 22+
@@ -211,4 +227,5 @@ packages/worker-protocol versioned JSON request/response types for the worker
 packages/worker-transport local IPC endpoint helpers and NDJSON framing
 tests/                   fixture-driven validation, conversion, and worker tests
 docs/adr/                architecture decisions
+native/juce-shell        optional JUCE standalone GUI shell over the existing worker
 ```
